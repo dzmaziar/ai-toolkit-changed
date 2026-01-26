@@ -87,8 +87,13 @@ class PhaseCorrelationLoss(nn.Module):
 
     # ---------- внутренности ----------
     def _prep_inputs(self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor):
-        Ia = rgb_to_luma(pred)   # Bx1xHxW
-        Ib = rgb_to_luma(target) # Bx1xHxW
+        
+        pred_0 = (pred / 2 + 0.5).clamp(0, 1)
+        tgt_0  = (target / 2 + 0.5).clamp(0, 1)
+
+        Ia = rgb_to_luma(pred_0)
+        Ib = rgb_to_luma(tgt_0)
+        
         m  = feather(mask, ksize=7).clamp(0, 1)
         Ia = self._apply_window(Ia, m)
         Ib = self._apply_window(Ib, m)
@@ -157,4 +162,4 @@ class PhaseCorrelationLoss(nn.Module):
 
     def _pce_loss(self, corr: torch.Tensor) -> torch.Tensor:
         pce = self._pce_value(corr)  # B
-        return (-torch.log(pce + 1e-8)).mean()
+        return torch.log1p(1.0 / (pce + 1e-8))

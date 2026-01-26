@@ -150,6 +150,7 @@ export interface TrainConfig {
   loss_Scale_coef: number;
   loss_AFC_coef: number;
   loss_Phase_coef: number;
+  loss_local_coef: number;
   min_beta:number;
   max_beta:number;
   r_bins: number;
@@ -181,6 +182,8 @@ export interface TrainConfig {
   local_w_afc: number;       
   local_w_phase: number;
   local_w_log: number;
+  gate: number;
+  v_scale: number;
    }
 
 export interface QuantizeKwargsConfig {

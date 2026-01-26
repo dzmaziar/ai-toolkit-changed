@@ -69,6 +69,27 @@ class SpectralPeriodLoss(torch.nn.Module):
 
     def _max_bin(self) -> int:
         return self.max_bin if self.max_bin is not None else self.r_bins - 1
+    @torch.no_grad()
+    def get_peak_center(self, img: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        # img: Bx3xHxW in [-1,1], mask: Bx1xHxW
+        img0 = (img / 2 + 0.5).clamp(0, 1)
+        I = rgb_to_luma(img0)  # Bx1xHxW
+        A = fft_amp(I, mask)   # Bx1xHxW
+
+        max_bin = self._max_bin()
+        if self.max_bin is None:
+            max_bin = min(max_bin, int(0.35 * self.r_bins)) 
+
+        S = radial_profile(
+            A, r_bins=self.r_bins,
+            min_bin=self.min_bin,
+            max_bin=max_bin,
+            log_scale=False
+        )
+        S = S / (S.sum(dim=-1, keepdim=True) + _EPS)
+        S_log = torch.log(S + _EPS)
+        _, ft = soft_peak(S_log, tau=self.tau, lo=self.min_bin, hi=max_bin)
+        return ft 
 
     def forward(
         self,
@@ -102,6 +123,10 @@ class SpectralPeriodLoss(torch.nn.Module):
         # в лог-пространство (мягче к разнице амплитуд)
         Sg_log = torch.log(Sg + _EPS)
         St_log = torch.log(St + _EPS)
+
+        ker = torch.tensor([0.25, 0.5, 0.25], device=Sg_log.device, dtype=Sg_log.dtype).view(1,1,-1)
+        Sg_log = F.conv1d(Sg_log.unsqueeze(1), ker, padding=1).squeeze(1)
+        St_log = F.conv1d(St_log.unsqueeze(1), ker, padding=1).squeeze(1)
 
         # гейтинг по "насколько есть выраженный период" в таргете
         # если таргет непериодичен — спектральный лосс не должен тянуть модель в случайный пик

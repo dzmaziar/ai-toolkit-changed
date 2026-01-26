@@ -492,6 +492,7 @@ class TrainConfig:
         self.loss_AFC_coef = kwargs.get('loss_AFC_coef', 0.0)
         self.loss_Phase_coef = kwargs.get('loss_Phase_coef', 0.0)
         self.loss_local_coef = kwargs.get('loss_local_coef', 0.0)
+        self.v_scale = kwargs.get('v_scale',0.2)
 
         self.min_beta = kwargs.get('min_beta', 0.0)
         self.max_beta = kwargs.get('max_beta', 0.5)
@@ -521,13 +522,42 @@ class TrainConfig:
         self.demean = kwargs.get('demean', True)
         self.exclude_radius = kwargs.get('exclude_radius', 7)
 
-        self.local_patch_size = kwargs.get('local_patch_size', 64)
-        self.local_stride = kwargs.get('local_stride', 32)
-        self.local_min_coverage = kwargs.get('local_min_coverage', 0.3)
+        self.local_patch_size = kwargs.get('local_patch_size', 192)  # default 192 for tiling materials
+        self.local_stride = kwargs.get('local_stride', 96)  # default half of patch_size
+        self.local_min_coverage = kwargs.get('local_min_coverage', 0.45)
+        self.local_hard_k_frac = kwargs.get('local_hard_k_frac', 0.30)  # fraction of worst patches for hard-mining
+        self.local_hard_k_min = kwargs.get('local_hard_k_min', 4)  # minimum number of patches for hard-mining
         self.local_w_spectral = kwargs.get('local_w_spectral', 0.5)
         self.local_w_afc = kwargs.get('local_w_afc', 1.5)
         self.local_w_phase = kwargs.get('local_w_phase', 1.2)   
         self.local_w_log = kwargs.get('local_w_log', 0.0)
+        self.gate = kwargs.get('gate', 0.65)
+        
+        # Advanced tiling losses (scientific improvements)
+        self.loss_seamless_coef = kwargs.get('loss_seamless_coef', 0.0)  # SeamlessLoss weight
+        self.loss_gradient_coef = kwargs.get('loss_gradient_coef', 0.0)  # GradientPeriodLoss weight
+        self.loss_cross_patch_coef = kwargs.get('loss_cross_patch_coef', 0.0)  # CrossPatchConsistencyLoss weight
+        self.loss_multiscale_coef = kwargs.get('loss_multiscale_coef', 0.0)  # MultiScaleSpectralLoss weight
+        self.loss_latent_period_coef = kwargs.get('loss_latent_period_coef', 0.0)  # LatentPeriodLoss weight
+        self.loss_anchor_coef = kwargs.get('loss_anchor_coef', 0.0)  # GlobalPeriodAnchorLoss - anchors pred to target period
+        
+        # GlobalPeriodAnchorLoss params
+        self.anchor_patch_size = kwargs.get('anchor_patch_size', 128)
+        self.anchor_stride = kwargs.get('anchor_stride', 64)
+        
+        # SeamlessLoss params
+        self.seamless_edge_width = kwargs.get('seamless_edge_width', 16)
+        self.seamless_use_gradient = kwargs.get('seamless_use_gradient', True)
+        self.seamless_multi_scale = kwargs.get('seamless_multi_scale', True)
+        self.seamless_check_diagonals = kwargs.get('seamless_check_diagonals', True)  # check 45°/135° stripes
+        self.seamless_diagonal_weight = kwargs.get('seamless_diagonal_weight', 0.5)  # weight for diagonal checks
+        
+        # CrossPatchConsistencyLoss params
+        self.cross_patch_size = kwargs.get('cross_patch_size', 128)
+        self.cross_patch_stride = kwargs.get('cross_patch_stride', 64)
+        
+        # MultiScaleSpectralLoss params
+        self.multiscale_scales = kwargs.get('multiscale_scales', [1.0, 0.5, 0.25])
 
         # scale the prediction by this. Increase for more detail, decrease for less
         self.pred_scaler = kwargs.get('pred_scaler', 1.0)

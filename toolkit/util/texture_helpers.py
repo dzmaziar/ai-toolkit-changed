@@ -172,7 +172,7 @@ def fft_amp(
         if m > fft_max_hw:
             scale = fft_max_hw / float(m)
             new_hw = (max(8, int(round(H * scale))), max(8, int(round(W * scale))))
-            img = F.interpolate(img, size=new_hw, mode="bilinear", align_corners=False)
+            img = F.interpolate(img, size=new_hw, mode="area") 
             if mask is not None:
                 mask = F.interpolate(mask, size=new_hw, mode="nearest")
 
