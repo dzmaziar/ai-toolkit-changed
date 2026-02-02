@@ -1081,6 +1081,103 @@ class SDTrainer(BaseSDTrainProcess):
             v_scale = self.train_config.v_scale
             pred_x0_latents_tex = (x_t - t01 * (v_scale * v)).to(self.device_torch, dtype=vae.dtype)
 
+
+            
+            # NEW: optional latent-space texture loss (no VAE decode)
+            if getattr(self.train_config, "texture_loss_in_latents", False):
+                # Build mask in latent resolution
+                if pred_latents_vae.ndim == 5:
+                    # (B,C,1,H,W) -> use H,W
+                    H_lat, W_lat = int(pred_latents_vae.shape[-2]), int(pred_latents_vae.shape[-1])
+                else:
+                    H_lat, W_lat = int(pred_latents_vae.shape[-2]), int(pred_latents_vae.shape[-1])
+
+                if batch.mask_tensor is not None and batch.mask_tensor.ndim == 4:
+                    mask_lat = batch.mask_tensor.to(vae.device, dtype=torch.float32)
+                    mask_lat = torch.nn.functional.interpolate(mask_lat, size=(H_lat, W_lat), mode="nearest")
+                else:
+                    mask_lat = torch.ones(
+                        (pred_latents_vae.shape[0], 1, H_lat, W_lat),
+                        device=vae.device,
+                        dtype=torch.float32
+                    )
+
+                def _latent_signal(z: torch.Tensor) -> torch.Tensor:
+                    # Normalize per-sample to keep FFT/phase stable.
+                    # Keep grad through pred; detach target to avoid extra graph.
+                    zf = z.float()
+                    mean = zf.mean(dim=(1, 2, 3) if zf.ndim == 4 else (1, 2, 3, 4), keepdim=True)
+                    std = zf.std(dim=(1, 2, 3) if zf.ndim == 4 else (1, 2, 3, 4), keepdim=True)
+                    zf = (zf - mean) / (std + 1e-6)
+                    # squash extremes (helps stability)
+                    return torch.tanh(zf)
+
+                # Remove singleton T dim for Qwen path so losses see 4D tensors
+                pred_sig = pred_latents_vae
+                tgt_sig = tgt_latents_vae
+                if pred_sig.ndim == 5 and pred_sig.shape[2] == 1:
+                    pred_sig = pred_sig[:, :, 0]
+                if tgt_sig.ndim == 5 and tgt_sig.shape[2] == 1:
+                    tgt_sig = tgt_sig[:, :, 0]
+
+                pred_sig = _latent_signal(pred_sig)
+                with torch.no_grad():
+                    tgt_sig = _latent_signal(tgt_sig)
+
+                beta = min(1.0, float(step) / float(warmup_steps))
+                final_beta = self.train_config.min_beta + beta * (self.train_config.max_beta - self.train_config.min_beta)
+
+                if self.train_config.texture_loss == "custom":
+                    print("custom with coef (latent)")
+                    tex_sp = self.spectral_period_loss(pred_sig, tgt_sig, mask_lat)
+                    tex_lp = self.logpolar_loss(pred_sig, tgt_sig, mask_lat)
+                    tex_acf = self.acf_period_loss(pred_sig, tgt_sig, mask_lat)
+                    tex_ph = self.phase_loss(pred_sig, tgt_sig, mask_lat)
+                    additional_loss = additional_loss + (
+                        self.train_config.loss_Spect_coef * tex_sp
+                        + self.train_config.loss_Log_coef * tex_lp
+                        + self.train_config.loss_AFC_coef * tex_acf
+                        + self.train_config.loss_Phase_coef * tex_ph
+                    )
+                    if step % 50 == 0:  # лог
+                        diag = self.phase_loss.diagnostics(pred_sig, tgt_sig, mask_lat)
+                        print(
+                            f"[step {step}] PCL diag: "
+                            f"center_prob={diag['center_prob']:.3f}  PCE={diag['PCE']:.2f}"
+                        )
+                elif self.train_config.texture_loss == "Phase":
+                    print("Phase (latent)")
+                    tex_ph = self.phase_loss(pred_sig, tgt_sig, mask_lat)
+                    additional_loss = additional_loss + tex_ph
+                    if step % 50 == 0:  # лог
+                        diag = self.phase_loss.diagnostics(pred_sig, tgt_sig, mask_lat)
+                        print(
+                            f"[step {step}] PCL diag: "
+                            f"center_prob={diag['center_prob']:.3f}  PCE={diag['PCE']:.2f}"
+                        )
+                elif self.train_config.texture_loss == "SpectralPeriodLoss":
+                    print("SpectralPeriodLoss (latent)")
+                    tex_sp = self.spectral_period_loss(pred_sig, tgt_sig, mask_lat)
+                    additional_loss = additional_loss + tex_sp
+                elif self.train_config.texture_loss == "LogPolarAlignLoss":
+                    print("LogPolarAlignLoss (latent)")
+                    tex_lp = self.logpolar_loss(pred_sig, tgt_sig, mask_lat)
+                    additional_loss = additional_loss + tex_lp
+                elif self.train_config.texture_loss == "ACFPeriodLoss":
+                    print("ACFPerdiodLoss (latent)")
+                    tex_acf = self.acf_period_loss(pred_sig, tgt_sig, mask_lat)
+                    additional_loss = additional_loss + tex_acf
+                elif self.train_config.texture_loss == "local":
+                    print("local (latent)")
+                    tex_local = self.local_texture_loss(pred_sig, tgt_sig, mask_lat)
+                    additional_loss = additional_loss + tex_local
+
+                print(f"BETA: {final_beta}")
+                print(f"LOSS {loss} and {additional_loss}")
+                return loss + final_beta * additional_loss
+                
+
+            
             pred_imgs = vae.decode(pred_x0_latents_tex / scaling_factor).sample.float()
             tgt_imgs  = vae.decode(tgt_latents_vae     / scaling_factor).sample.float()
 
