@@ -485,6 +485,9 @@ class TrainConfig:
         self.is_Qwen = kwargs.get('is_Qwen', False)
         self.is_new = kwargs.get('is_new', False)
         self.texture_loss = kwargs.get('texture_loss', 'custom')
+
+        self.texture_loss_in_latents: bool = kwargs.get('texture_loss_in_latents', False)
+        
         self.loss_coef = kwargs.get('loss_coef', 0.0)
         self.loss_Spect_coef = kwargs.get('loss_Spect_coef', 0.0)
         self.loss_Log_coef = kwargs.get('loss_Log_coef', 0.0)
