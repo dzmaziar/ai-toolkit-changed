@@ -134,13 +134,18 @@ def load_optional_mask(mask_path: Optional[str], fallback_size_hw: Tuple[int, in
 
 
 # ------------------------- Spectral utilities -------------------------- #
-
 def rgb_to_luma(x: torch.Tensor) -> torch.Tensor:
-    """Bx3xHxW -> Bx1xHxW (BT.2020-like)."""
+    """BxCxHxW -> Bx1xHxW.
+    - C=1: passthrough
+    - C=3: BT.2020-like weights
+    - иначе (например C=16 латенты): среднее по каналам
+    """
     if x.size(1) == 1:
         return x
-    r, g, b = x[:, 0:1], x[:, 1:2], x[:, 2:3]
-    return 0.2627 * r + 0.6780 * g + 0.0593 * b
+    if x.size(1) == 3:
+        r, g, b = x[:, 0:1], x[:, 1:2], x[:, 2:3]
+        return 0.2627 * r + 0.6780 * g + 0.0593 * b
+    return x.mean(dim=1, keepdim=True)
 
 
 def feather(mask: torch.Tensor, ksize: int = 7) -> torch.Tensor:
