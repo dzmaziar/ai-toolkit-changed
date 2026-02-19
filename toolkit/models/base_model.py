@@ -412,6 +412,28 @@ class BaseModel:
 
         if pipeline is None:
             pipeline = self.get_generation_pipeline()
+            # If training used diffusers IP-Adapter (frozen conditioning), load it into the
+            # generation pipeline too. This avoids reusing the training pipeline object, which can
+            # be in an offloaded/modified state and may lead to noisy outputs in some setups.
+            cfg = getattr(self, "diffusers_ip_adapter_config", None)
+            if cfg is not None and getattr(cfg, "type", None) == "ip_diffusers_flux":
+                if hasattr(pipeline, "load_ip_adapter"):
+                    load_kwargs = {}
+                    if getattr(cfg, "weight_name", None) is not None:
+                        load_kwargs["weight_name"] = cfg.weight_name
+                    if getattr(cfg, "subfolder", None) is not None:
+                        load_kwargs["subfolder"] = cfg.subfolder
+                    if getattr(cfg, "image_encoder_path", None) is not None:
+                        load_kwargs["image_encoder_pretrained_model_name_or_path"] = cfg.image_encoder_path
+                    try:
+                        pipeline.load_ip_adapter(cfg.name_or_path, **load_kwargs)
+                    except TypeError:
+                        load_kwargs.pop("image_encoder_pretrained_model_name_or_path", None)
+                        pipeline.load_ip_adapter(cfg.name_or_path, **load_kwargs)
+                    try:
+                        pipeline._diffusers_ip_adapter_loaded = True
+                    except Exception:
+                        pass
             try:
                 pipeline.set_progress_bar_config(disable=True)
             except:
@@ -474,6 +496,106 @@ class BaseModel:
                             validation_image = validation_image * 2.0 - 1.0
                             validation_image = validation_image.unsqueeze(0)
                             self.adapter.set_reference_images(validation_image)
+                    # Diffusers IP-Adapter (frozen conditioning) path.
+                    # In this mode we do NOT create self.adapter (so toolkit/ip_adapter.py is bypassed).
+                    # Instead, we compute ip_adapter_image_embeds via the diffusers pipeline helper and
+                    # pass them into the transformer via joint_attention_kwargs.
+                    if (
+                        self.adapter is None
+                        and gen_config.adapter_image_path is not None
+                        and getattr(pipeline, "_diffusers_ip_adapter_loaded", False)
+                    ):
+                        # Ensure the pipeline call will accept the injected kwargs.
+                        try:
+                            sig = inspect.signature(pipeline.__call__)
+                            accepts_joint = (
+                                "joint_attention_kwargs" in sig.parameters
+                                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                            )
+                            if not accepts_joint:
+                                raise ValueError(
+                                    "This pipeline does not accept joint_attention_kwargs; "
+                                    "cannot use diffusers IP-Adapter for sampling."
+                                )
+                        except ValueError:
+                            raise
+                        except Exception:
+                            # Best-effort: signature introspection can fail for wrapped/compiled callables.
+                            pass
+
+                        from PIL.ImageOps import exif_transpose
+
+                        # Support comma-separated paths for multi-image IP-Adapter setups.
+                        ref_paths = [p.strip() for p in str(gen_config.adapter_image_path).split(",") if p.strip()]
+                        ref_pils = []
+                        for pth in ref_paths:
+                            # avoid leaking file handles (important on Windows)
+                            with Image.open(pth) as _im:
+                                img = exif_transpose(_im).convert("RGB")
+                                ref_pils.append(img)
+
+                        # Apply per-sample scale if supported.
+                        if hasattr(pipeline, "set_ip_adapter_scale"):
+                            try:
+                                pipeline.set_ip_adapter_scale(float(getattr(gen_config, "adapter_conditioning_scale", 1.0)))
+                            except Exception:
+                                pass
+
+                        # Flux-Kontext sampling uses Flux guidance embedding (not classic CFG).
+                        # For SD-like pipelines, a reasonable heuristic is CFG when guidance_scale > 1.
+                        do_cfg_for_ip = False
+                        try:
+                            if getattr(self, "arch", None) not in ("flux_kontext", "flux"):
+                                do_cfg_for_ip = float(getattr(gen_config, "guidance_scale", 1.0)) > 1.0
+                        except Exception:
+                            do_cfg_for_ip = False
+
+                        with torch.no_grad():
+                            prep_kwargs = dict(
+                                ip_adapter_image=ref_pils,
+                                ip_adapter_image_embeds=None,
+                                device=self.device_torch,
+                                num_images_per_prompt=1,
+                            )
+
+                            prep_fn = pipeline.prepare_ip_adapter_image_embeds
+
+                            # Pass do_classifier_free_guidance only if this diffusers build supports it
+                            try:
+                                import inspect as _inspect
+                                sig_prep = _inspect.signature(prep_fn)
+                                if "do_classifier_free_guidance" in sig_prep.parameters:
+                                    prep_kwargs["do_classifier_free_guidance"] = do_cfg_for_ip
+                            except Exception:
+                                pass
+
+                            try:
+                                ip_embeds = prep_fn(**prep_kwargs)
+                            except TypeError:
+                                # FluxKontextPipeline часто не принимает do_classifier_free_guidance — пробуем без него
+                                prep_kwargs.pop("do_classifier_free_guidance", None)
+                                try:
+                                    ip_embeds = prep_fn(**prep_kwargs)
+                                except TypeError:
+                                    # Последний fallback: старые/нестандартные сигнатуры с позиционными аргументами
+                                    try:
+                                        ip_embeds = prep_fn(ref_pils, None, self.device_torch, 1)
+                                    except TypeError:
+                                        try:
+                                            ip_embeds = prep_fn(ref_pils, None, self.device_torch)
+                                        except TypeError:
+                                            ip_embeds = prep_fn(ref_pils, None)
+
+                        jat = extra.get("joint_attention_kwargs")
+                        if jat is None:
+                            jat = {}
+                        if not isinstance(jat, dict):
+                            raise ValueError(
+                                f"joint_attention_kwargs must be a dict, got {type(jat)}"
+                            )
+                        jat = dict(jat)
+                        jat["ip_adapter_image_embeds"] = ip_embeds
+                        extra["joint_attention_kwargs"] = jat
 
                     if network is not None:
                         network.multiplier = gen_config.network_multiplier

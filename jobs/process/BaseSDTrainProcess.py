@@ -1430,8 +1430,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
             suffix = 'clip'
         elif self.adapter_config.type == 'reference':
             suffix = 'ref'
+        elif self.adapter_config.type == 'ip_diffusers_flux':
+            suffix = 'ip'
         elif self.adapter_config.type.startswith('ip'):
             suffix = 'ip'
+
         else:
             suffix = 'adapter'
         adapter_name = self.name
@@ -1482,6 +1485,102 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 sd=self.sd,
                 adapter_config=self.adapter_config,
             )
+        elif self.adapter_config.type == 'ip_diffusers_flux':
+            pipe = getattr(self.sd, "pipeline", None)
+            if pipe is None or not hasattr(pipe, "load_ip_adapter"):
+                raise ValueError("sd.pipeline has no load_ip_adapter() (diffusers IP-Adapter required)")
+            # Sanity checks for the pinned diffusers build.
+            # - prepare_ip_adapter_image_embeds() is needed at train & sample time.
+            # - transformer.forward must accept joint_attention_kwargs (or **kwargs) so we can inject embeds.
+            if not hasattr(pipe, "prepare_ip_adapter_image_embeds"):
+                raise ValueError(
+                    "sd.pipeline has no prepare_ip_adapter_image_embeds() (diffusers IP-Adapter required)"
+                )
+            try:
+                import inspect
+                tfm = getattr(pipe, "transformer", None)
+                if tfm is not None and hasattr(tfm, "forward"):
+                    sig = inspect.signature(tfm.forward)
+                    if (
+                        "joint_attention_kwargs" not in sig.parameters
+                        and not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                    ):
+                        raise ValueError(
+                            "pipe.transformer.forward() does not accept joint_attention_kwargs; "
+                            "your pinned diffusers is missing Flux IP-Adapter support."
+                        )
+            except ValueError:
+                raise
+            except Exception:
+                # best-effort: signature introspection can fail with compiled/wrapped modules
+                pass
+
+            # чтобы не грузить повторно, если setup_adapter вызовут ещё раз
+            if getattr(pipe, "_diffusers_ip_adapter_loaded", False):
+                return
+
+            # важно: для diffusers IP-Adapter нам нужен путь, но НЕ нужны clip_image_tensor
+            for ds in self.dataset_configs:
+                setattr(ds, "clip_image_path_only", True)
+
+            repo = self.adapter_config.name_or_path
+            if repo is None:
+                raise ValueError("adapter.name_or_path is required for ip_diffusers_flux")
+
+            load_kwargs = {}
+            if getattr(self.adapter_config, "weight_name", None) is not None:
+                load_kwargs["weight_name"] = self.adapter_config.weight_name
+            if getattr(self.adapter_config, "subfolder", None) is not None:
+                load_kwargs["subfolder"] = self.adapter_config.subfolder
+            if getattr(self.adapter_config, "image_encoder_path", None) is not None:
+                load_kwargs["image_encoder_pretrained_model_name_or_path"] = self.adapter_config.image_encoder_path
+
+            try:
+                pipe.load_ip_adapter(repo, **load_kwargs)
+            except TypeError:
+                # fallback на случай другой сигнатуры
+                load_kwargs.pop("image_encoder_pretrained_model_name_or_path", None)
+                pipe.load_ip_adapter(repo, **load_kwargs)
+
+            scale = float(getattr(self.adapter_config, "conditioning_scale", 1.0))
+            if hasattr(pipe, "set_ip_adapter_scale"):
+                try:
+                    pipe.set_ip_adapter_scale(scale)
+                except Exception:
+                    pass
+
+            pipe._diffusers_ip_adapter_loaded = True
+          # Store config on sd for sampling-time conditioning (there is no self.adapter object in this mode).
+            try:
+                setattr(self.sd, "diffusers_ip_adapter_config", self.adapter_config)
+            except Exception:
+                pass
+
+
+            # ВАЖНО: мы не обучаем IP-Adapter. После load_ip_adapter() новые параметры могут иметь requires_grad=True,
+            # потому что они создаются ПОСЛЕ заморозки base-модели. Явно замораживаем их, чтобы не тратить память на грады.
+            try:
+                transformer = getattr(pipe, 'transformer', None)
+                if transformer is not None:
+                    for n, p in transformer.named_parameters():
+                        nl = n.lower()
+                        if ('.to_k_ip.' in nl) or ('.to_v_ip.' in nl) or ('ip_adapter' in nl) or ('image_proj' in nl) or ('proj_model' in nl):
+                            p.requires_grad_(False)
+            except Exception:
+                pass
+
+            # если в пайплайне есть отдельный image encoder / proj-model — тоже заморозим
+            for attr in ['image_encoder', 'image_proj_model', 'ip_adapter_proj_model', 'ip_adapter', 'image_projection']:
+                m = getattr(pipe, attr, None)
+                if m is not None and hasattr(m, 'requires_grad_'):
+                    try:
+                        m.requires_grad_(False)
+                        m.eval()
+                    except Exception:
+                        pass
+            # ВАЖНО: не создаём self.adapter вообще
+            return
+
         elif self.adapter_config.type.startswith('ip'):
             self.adapter = IPAdapter(
                 sd=self.sd,
@@ -1714,6 +1813,18 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         self.hook_after_model_load()
         flush()
+        # If requested, load diffusers IP-Adapter before creating the LoRA network.
+        # This allows LoRA to attach to IP-attention projection layers (e.g. to_k_ip/to_v_ip)
+        # that are created by diffusers during load_ip_adapter().
+        if (
+            self.adapter_config is not None
+            and getattr(self.adapter_config, "type", None) == "ip_diffusers_flux"
+            and getattr(self.adapter_config, "use_as_frozen_conditioning", False)
+            and getattr(self.adapter_config, "lora_on_ip_attention", False)
+            and self.network_config is not None
+        ):
+            self.setup_adapter()
+
         if not self.is_fine_tuning:
             if self.network_config is not None:
                 # TODO should we completely switch to LycorisSpecialNetwork?
@@ -1907,8 +2018,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             'lr': self.train_config.adapter_lr
                         })
 
-                if self.train_config.gradient_checkpointing:
-                    self.adapter.enable_gradient_checkpointing()
+                if self.train_config.gradient_checkpointing and self.adapter is not None:
+                    if hasattr(self.adapter, "enable_gradient_checkpointing"):
+                        self.adapter.enable_gradient_checkpointing()
                 flush()
 
             params = self.load_additional_training_modules(params)

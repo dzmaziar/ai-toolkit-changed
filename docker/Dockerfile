@@ -55,13 +55,13 @@ COPY . .
 RUN ln -s /usr/bin/python3 /usr/bin/python || true && \
     ln -s /usr/bin/pip3 /usr/bin/pip || true
 
-# Сначала ставим PyTorch (как в README ai-toolkit: torch 2.7.0 + cu126)
-# cu126 отлично работает с драйвером/рантаймом 12.8
-RUN pip install --no-cache-dir \
-    torch==2.7.0 \
-    torchvision==0.22.0 \
-    torchaudio==2.7.0 \
-    --index-url https://download.pytorch.org/whl/cu126
+# Обновим pip, чтобы корректно тянул нужные колёса
+RUN python -m pip install --upgrade pip setuptools wheel
+
+# Ставим ТОЛЬКО nightly PyTorch под CUDA 12.8 (cu128) без конфликтов
+RUN pip uninstall -y torch torchvision torchaudio || true && \
+    pip install --no-cache-dir --pre torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/nightly/cu128
 
 # Остальные Python-зависимости
 RUN pip install --no-cache-dir -r requirements.txt

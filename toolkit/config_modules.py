@@ -220,7 +220,12 @@ class NetworkConfig:
         self.pretrained_lora_path = kwargs.get('pretrained_lora_path', None)
 
 
-AdapterTypes = Literal['t2i', 'ip', 'ip+', 'clip', 'ilora', 'photo_maker', 'control_net', 'control_lora', 'i2v']
+AdapterTypes = Literal[
+    't2i', 'ip', 'ip+', 'ip_diffusers_flux',
+    'clip', 'ilora', 'photo_maker',
+    'control_net', 'control_lora', 'i2v',
+    'reference'
+]
 
 CLIPLayer = Literal['penultimate_hidden_states', 'image_embeds', 'last_hidden_state']
 
@@ -241,9 +246,22 @@ class AdapterConfig:
                 self.test_img_path = [p.strip() for p in self.test_img_path]
                 self.test_img_path = [p for p in self.test_img_path if p != '']
                 
-        self.train: str = kwargs.get('train', False)
+        # whether adapter is trained (most modes keep adapters frozen)
+        self.train: bool = bool(kwargs.get('train', False))
         self.image_encoder_path: str = kwargs.get('image_encoder_path', None)
         self.name_or_path = kwargs.get('name_or_path', None)
+        # diffusers IP-Adapter (flux) params
+        self.weight_name: Optional[str] = kwargs.get("weight_name", None)
+        self.subfolder: Optional[str] = kwargs.get("subfolder", None)
+
+        # поведение в train loop: IP-Adapter как frozen-conditioning
+        self.use_as_frozen_conditioning: bool = kwargs.get("use_as_frozen_conditioning", False)
+        self.conditioning_scale: float = float(kwargs.get("conditioning_scale", 1.0))
+        # Optional: if true, load diffusers IP-Adapter BEFORE LoRA creation so LoRA can attach
+        # to newly added IP-attention projections (e.g. to_k_ip/to_v_ip) inside the transformer.
+        self.lora_on_ip_attention: bool = bool(kwargs.get("lora_on_ip_attention", False))
+        # optional: adapter-specific logging cadence (steps). If not set, trainer may use performance_log_every.
+        self.log_every_steps: Optional[int] = kwargs.get("log_every_steps", None)
 
         num_tokens = kwargs.get('num_tokens', None)
         if num_tokens is None and self.type.startswith('ip'):

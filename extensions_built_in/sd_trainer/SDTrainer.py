@@ -1725,6 +1725,74 @@ class SDTrainer(BaseSDTrainProcess):
 
                 # flush()
                 pred_kwargs = {}
+                # --- diffusers IP-Adapter for FLUX (frozen conditioning) ---
+                if (
+                    self.adapter_config is not None
+                    and getattr(self.adapter_config, "type", None) == "ip_diffusers_flux"
+                    and getattr(self.adapter_config, "use_as_frozen_conditioning", False)
+                    and not is_reg
+                ):
+                    pipe = getattr(self.sd, "pipeline", None)
+                    if pipe is None:
+                        raise ValueError("sd.pipeline is None (FluxKontext pipeline not initialized)")
+                    if not hasattr(pipe, "prepare_ip_adapter_image_embeds"):
+                        raise ValueError(
+                            "sd.pipeline has no prepare_ip_adapter_image_embeds() "
+                            "(diffusers IP-Adapter required)."
+                        )
+
+                    scale = float(getattr(self.adapter_config, "conditioning_scale", 1.0))
+                    if hasattr(pipe, "set_ip_adapter_scale"):
+                        try:
+                            pipe.set_ip_adapter_scale(scale)
+                        except Exception:
+                            pass
+
+                    from PIL.ImageOps import exif_transpose
+                    import inspect
+                    ref_pils = []
+                    for fi in batch.file_items:
+                        ref_path = getattr(fi, "clip_image_path", None)
+                        if ref_path is None:
+                            raise ValueError("clip_image_path is required in datasets for ip_diffusers_flux")
+                        # Use context manager to avoid leaking file handles (important on Windows)
+                        with Image.open(ref_path) as _im:
+                            img = exif_transpose(_im).convert("RGB")
+                            ref_pils.append(img)
+
+                    with torch.no_grad():
+                        sig = inspect.signature(pipe.prepare_ip_adapter_image_embeds)
+                        kwargs_ip = dict(
+                            ip_adapter_image=ref_pils,
+                            ip_adapter_image_embeds=None,
+                            device=self.device_torch,
+                            num_images_per_prompt=1,
+                        )
+                        if "do_classifier_free_guidance" in sig.parameters:
+                            kwargs_ip["do_classifier_free_guidance"] = self.train_config.do_cfg
+                        ip_embeds = pipe.prepare_ip_adapter_image_embeds(**kwargs_ip)
+
+                        # Validate batch size compatibility with BaseModel.predict_noise() CFG behavior.
+                        # predict_noise() will duplicate latents when CFG is active, so ip_embeds must match that.
+                        expected_bs = len(ref_pils) * (2 if self.train_config.do_cfg else 1)
+
+                        def _validate_tensor(t: torch.Tensor, where: str):
+                            if t.shape[0] != expected_bs:
+                                raise ValueError(
+                                    f"prepare_ip_adapter_image_embeds() returned batch={t.shape[0]} in {where}, "
+                                    f"expected {expected_bs} (cfg={self.train_config.do_cfg}). "
+                                    f"Your pinned diffusers may not support CFG-aware IP-Adapter embeds for Flux."
+                                )
+
+                        if torch.is_tensor(ip_embeds):
+                            _validate_tensor(ip_embeds, "tensor")
+                        elif isinstance(ip_embeds, (list, tuple)) and len(ip_embeds) > 0 and torch.is_tensor(ip_embeds[0]):
+                            for idx, t in enumerate(ip_embeds):
+                                _validate_tensor(t, f"list[{idx}]")
+
+                    pred_kwargs["joint_attention_kwargs"] = {"ip_adapter_image_embeds": ip_embeds}
+
+                # --- end diffusers IP-Adapter ---
 
                 if has_adapter_img:
                     if (self.adapter and isinstance(self.adapter, T2IAdapter)) or (

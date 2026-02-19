@@ -103,6 +103,11 @@ export interface DatasetConfig {
   fps?: number;
   flip_x: boolean;
   flip_y: boolean;
+  clip_image_path?: string | null;
+  clip_image_from_same_folder?: boolean;
+  clip_image_augmentations?: any[] | null;
+  clip_image_shuffle_augmentations?: boolean;
+  clip_image_path_only?: boolean;
   num_repeats?: number;
   control_path_1?: string | null;
   control_path_2?: string | null;
@@ -216,6 +221,22 @@ export interface SliderConfig {
   anchor_class?: string | null;
 }
 
+export interface AdapterConfig {
+  type: string; // "ip_diffusers_flux"
+  name_or_path?: string | null;
+  weight_name?: string | null;
+  subfolder?: string | null;
+
+  image_encoder_path?: string | null;
+
+  use_as_frozen_conditioning?: boolean;
+  conditioning_scale?: number;
+  log_every_steps?: number;
+
+  train?: boolean; // чтобы старые конфиги не ломались
+}
+
+
 export interface ProcessConfig {
   type: string;
   sqlite_db_path?: string;
@@ -223,6 +244,7 @@ export interface ProcessConfig {
   performance_log_every: number;
   trigger_word: string | null;
   device: string;
+  adapter?: AdapterConfig;
   network?: NetworkConfig;
   slider?: SliderConfig;
   save: SaveConfig;
@@ -250,9 +272,12 @@ export interface JobConfig {
 }
 
 export interface ConfigDoc {
-  title: string | React.ReactNode;
-  description: React.ReactNode;
+  title: string | UiNode;
+  description: UiNode;
 }
+
+// We keep UI-facing docs flexible without depending on React typings.
+export type UiNode = any;
 
 export interface SelectOption {
   readonly value: string;

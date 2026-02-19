@@ -1182,6 +1182,12 @@ class ClipImageFileItemDTOMixin:
             return self.clip_image_path
 
     def load_clip_image(self: 'FileItemDTO'):
+        # если нам нужен только путь (для diffusers IP-Adapter) — тензор не грузим
+        if getattr(self.dataset_config, "clip_image_path_only", False):
+            if self.clip_image_path is None:
+                self.clip_image_path = self.get_new_clip_image_path()
+            return
+
         is_dynamic_size_and_aspect = isinstance(self.clip_image_processor, PixtralVisionImagePreprocessorCompatible) or \
                                     isinstance(self.clip_image_processor, SiglipImageProcessor)
         if self.clip_image_processor is None:
